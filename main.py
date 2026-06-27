@@ -99,6 +99,7 @@ class AutoMarkApp:
 
     def find_corners_by_lines(self, edged):
         """通过霍夫直线寻找答题卡的4个角点"""
+        # 使用概率霍夫变换检测直线
         lines = cv2.HoughLinesP(edged, 1, np.pi / 180, threshold=80, minLineLength=100, maxLineGap=20)
         if lines is None:
             return None
@@ -106,6 +107,7 @@ class AutoMarkApp:
         horizontal_lines = []
         vertical_lines = []
 
+        # 区分水平和垂直直线
         for line in lines:
             x1, y1, x2, y2 = line[0]
             angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
@@ -117,6 +119,7 @@ class AutoMarkApp:
         if len(horizontal_lines) < 2 or len(vertical_lines) < 2:
             return None
 
+        # 取最靠上、最靠下、最靠左、最靠右的直线
         top_line = min(horizontal_lines, key=lambda l: min(l[1], l[3]))
         bottom_line = max(horizontal_lines, key=lambda l: max(l[1], l[3]))
         left_line = min(vertical_lines, key=lambda l: min(l[0], l[2]))
@@ -143,25 +146,21 @@ class AutoMarkApp:
         return np.array([tl, tr, br, bl], dtype="float32")
 
     def auto_warp_perspective(self, img_bgr):
-        """自动寻找答题卡外框 + 四点透视矫正 + 统一缩放到标准尺寸"""
-        DEBUG = os.getenv("AUTOMARKAPP_DEBUG", "").lower() in ["1", "true", "yes"]
-
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         edged = cv2.Canny(blur, 50, 150)
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        edged = cv2.dilate(edged, kernel, iterations=1)
-
+        
         img_h, img_w = img_bgr.shape[:2]
+        
         contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         screen_cnt = None
-
+        
+        # 遍历面积最大的前5个轮廓
         for c in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
             if len(approx) == 4:
+                # 【关键升级1】：不能直接拿来用，必须校验检测到的四边形是否合理
                 pts = approx.reshape(4, 2)
                 rect = np.zeros((4, 2), dtype="float32")
                 s = pts.sum(axis=1)
@@ -170,42 +169,37 @@ class AutoMarkApp:
                 diff = np.diff(pts, axis=1)
                 rect[1] = pts[np.argmin(diff)]
                 rect[3] = pts[np.argmax(diff)]
-
+                
                 (tl, tr, br, bl) = rect
+                # 修复正确的宽高计算公式
                 w1 = int(np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2)))
                 w2 = int(np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2)))
                 h1 = int(np.sqrt(((bl[0] - tl[0]) ** 2) + ((bl[1] - tl[1]) ** 2)))
                 h2 = int(np.sqrt(((br[0] - tr[0]) ** 2) + ((br[1] - tr[1]) ** 2)))
-
+                
                 maxW = max(w1, w2)
                 maxH = max(h1, h2)
-
+                
+                # 【关键升级2】：合理性校验
+                # 1. 面积不能小于原图的 20%（防止截取到局部细节）
+                # 2. 长宽比不能极端夸张（防止截取到边缘残缺的细长梯形）
                 if maxW > 0 and maxH > 0:
                     area_ratio = (maxW * maxH) / (img_w * img_h)
                     aspect_ratio = maxW / maxH if maxW > maxH else maxH / maxW
                     if area_ratio > 0.2 and aspect_ratio < 5.0:
                         screen_cnt = approx
-                        break
+                        break # 找到合理的完整边框，跳出循环
 
+        # 【关键升级3】：如果多边形拟合失败，或拟合出的四边形不合理（残缺），启用霍夫直线法
         if screen_cnt is None:
-            if DEBUG:
-                print("[DEBUG] 多边形拟合失败，通过霍夫直线寻找答题卡的4个角点")
             screen_cnt = self.find_corners_by_lines(edged)
-
+            
         if screen_cnt is None:
-            if DEBUG:
-                print("[DEBUG] 霍夫直线失败，回退到最小外接旋转矩形")
-            if len(contours) > 0:
-                c_max = max(contours, key=cv2.contourArea)
-                if cv2.contourArea(c_max) > 5000:
-                    rect_box = cv2.minAreaRect(c_max)
-                    screen_cnt = cv2.boxPoints(rect_box)
+            return None
 
-        if screen_cnt is None:
-            return None, None
-
-        pts = screen_cnt.reshape(4, 2) if screen_cnt.shape == (4, 1, 2) else np.array(screen_cnt, dtype="float32")
-
+        pts = screen_cnt if not isinstance(screen_cnt, np.ndarray) or screen_cnt.shape == (4, 2) else screen_cnt.reshape(4, 2)
+        
+        # 再次进行四点排序（处理霍夫直线返回的数据）
         rect = np.zeros((4, 2), dtype="float32")
         s = pts.sum(axis=1)
         rect[0] = pts[np.argmin(s)]
@@ -215,22 +209,17 @@ class AutoMarkApp:
         rect[3] = pts[np.argmax(diff)]
 
         (tl, tr, br, bl) = rect
-
+        
+        # 修复宽高计算
         maxW = max(int(np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))),
                    int(np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))))
         maxH = max(int(np.sqrt(((bl[0] - tl[0]) ** 2) + ((bl[1] - tl[1]) ** 2))),
                    int(np.sqrt(((br[0] - tr[0]) ** 2) + ((br[1] - tr[1]) ** 2))))
-
-        if maxW < 50 or maxH < 50:
-            return None, None
-
+                   
         dst = np.array([[0, 0], [maxW, 0], [maxW, maxH], [0, maxH]], dtype="float32")
         M = cv2.getPerspectiveTransform(rect, dst)
         warp = cv2.warpPerspective(img_bgr, M, (maxW, maxH))
-
-        # 统一缩放到标准尺寸 900x1200
         warp_standard = cv2.resize(warp, (self.standard_w, self.standard_h), interpolation=cv2.INTER_AREA)
-
         scale_x = maxW / self.standard_w
         scale_y = maxH / self.standard_h
         transform_info = {
@@ -242,140 +231,112 @@ class AutoMarkApp:
             'orig_h': maxH
         }
 
-        return warp_standard, transform_info
+        return warp, transform_info
 
-    # ==================== 阅卷核心 ====================
-
-    def mark_sheet_image(self, img_warped, transform_info=None):
-        """识别答题卡选项，返回答案字典和得分"""
+    # 自动寻找答题卡外框 + 四点透视矫正
+    def mark_sheet_image(self, img_warped, transform_info):
+        # 读取环境变量，开启调试日志
         DEBUG = os.getenv("AUTOMARKAPP_DEBUG", "").lower() in ["1", "true", "yes"]
-
+        DEBUG_BIN = os.getenv("AUTOMARKAPP_DEBUG_OUTBIN", "").lower() in ["1", "true", "yes"]
+        
         gray = cv2.cvtColor(img_warped, cv2.COLOR_BGR2GRAY)
-
-        # Otsu 自动阈值
+        # 取消反向！白底黑字正常二值化
+        #_, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        kernel = np.ones((3, 3), np.uint8)
+        # 形态学闭运算，把细线补全
+        kernel = np.ones((3,3), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        cv2.imwrite("debug_binary.png", binary)
+        if DEBUG_BIN: cv2.imwrite("debug_binary.png", binary)
 
         contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
         box_list = []
-
-        # 动态计算方框尺寸阈值
-        expected_w = 55
-        expected_h = 42
-        w_tolerance = 0.5
-        h_tolerance = 0.5
-        w_min = int(expected_w * (1 - w_tolerance))
-        w_max = int(expected_w * (1 + w_tolerance))
-        h_min = int(expected_h * (1 - h_tolerance))
-        h_max = int(expected_h * (1 + h_tolerance))
-
-        # ==================== 关键修复：排除标题区域 ====================
-        y_min_threshold = 100
-
-        if DEBUG:
-            print(f"[DEBUG] 方框尺寸阈值: w=[{w_min}, {w_max}], h=[{h_min}, {h_max}]")
-            print(f"[DEBUG] Y坐标下限: {y_min_threshold} (排除标题区域)")
-
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            if DEBUG:
-                print(f"raw rect x:{x} y:{y} w:{w} h:{h}")
-
-            if w > 200 or h > 200:
-                continue
-            if w < 15 or h < 15:
-                continue
-
-            # ==================== 关键修复：y 坐标过滤 ====================
-            if y < y_min_threshold:
-                if DEBUG:
-                    print(f"  -> 跳过: y={y} < {y_min_threshold} (标题区域)")
-                continue
-            if y > self.standard_h - 50:
-                continue
-
-            if w_min < w < w_max and h_min < h < h_max:
+            if DEBUG: print(f"raw rect w:{w} h:{h}")
+            if w > (200 * transform_info['scale_x']) or h > (200 * transform_info['scale_y']): continue
+            if w < (25 * transform_info['scale_x']) or h < (25 * transform_info['scale_y']): continue
+            if (45 * transform_info['scale_x']) < w < (75 * transform_info['scale_x']) and (35 * transform_info['scale_y']) < h < (55 * transform_info['scale_y']):
                 box_list.append((x, y, w, h))
-                if DEBUG:
-                    print(f"  -> 保留: 符合方框尺寸")
-
-        # 去重
+        # 按横坐标、纵坐标聚类，只保留面积最大的外框
         unique_box = {}
         for (x, y, w, h) in box_list:
+            # 坐标取整，把同一方框的内外框合并到一组
             key = (round(x, -1), round(y, -1))
             area = w * h
             if key not in unique_box or area > unique_box[key][2] * unique_box[key][3]:
                 unique_box[key] = (x, y, w, h)
+        
         box_list = list(unique_box.values())
-
-        # 排序
-        box_list.sort(key=lambda b: (round(b[1] / 70), b[0]))
+        # 重新排序
+        box_list.sort(key=lambda b: (round(b[1]/70), b[0]))
 
         if DEBUG:
             print(f"[DEBUG] 检测到候选方框总数: {len(box_list)}")
-            for i, (x, y, w, h) in enumerate(box_list):
-                print(f"  方框[{i}]: x={x}, y={y}, w={w}, h={h}")
-
-        if len(box_list) < 4:
+        
+        if len(box_list) < self.config['option_count']:
             if DEBUG:
                 print("[DEBUG] 方框数量不足，识别失败")
             return None, 0, box_list
-
+    
+        # 从上到下、从左到右排序方框
+        # box_list.sort(key=lambda b: (b[1], b[0]))
+        
+        if DEBUG:
+            print(f"[DEBUG] 排序后方框坐标列表: {box_list}")
+    
         q_total = self.config["question_count"]
         opt_total = self.config["option_count"]
         threshold = self.config["fill_ratio_threshold"]
         std_ans = self.config["standard_answer"]
-
+    
         correct = 0
         user_answer = {}
-
+    
         for q_idx in range(q_total):
             slice_box = box_list[q_idx * opt_total: (q_idx + 1) * opt_total]
-            if len(slice_box) < opt_total:
-                user_answer[str(q_idx)] = -1
-                continue
-
             best_opt = -1
             max_ratio = 0
             padding = 6
-
             for opt_idx, (x, y, w, h) in enumerate(slice_box):
-                roi = binary[y + padding:y + h - padding, x + padding:x + w - padding]
-                if roi.size == 0:
-                    continue
+                roi = binary[y+padding:y+h-padding, x+padding:x+w-padding]
                 total_pix = roi.shape[0] * roi.shape[1]
                 black_pix = total_pix - cv2.countNonZero(roi)
+                if total_pix == 0:
+                    max_ratio = 0
+                    best_opt = -1
+                    continue
                 ratio = black_pix / total_pix
-
+                
                 if DEBUG:
                     print(f"[DEBUG] 第{q_idx+1}题 选项{opt_idx} 涂黑占比: {ratio:.3f}")
-
+                
                 if ratio > max_ratio:
                     max_ratio = ratio
                     best_opt = opt_idx
-
+            
             if max_ratio >= threshold:
                 user_answer[str(q_idx)] = best_opt
             else:
                 user_answer[str(q_idx)] = -1
-
+            
             if DEBUG:
                 print(f"[DEBUG] 第{q_idx+1}题最终选择: {user_answer[str(q_idx)]}")
-
+    
+        # 统计得分
         for key in std_ans:
             if user_answer.get(key, -1) == std_ans[key]:
                 correct += 1
-
+        
         score = round((correct / q_total) * 100, 2)
-
+        
         if DEBUG:
             print(f"[DEBUG] 考生答案集合: {user_answer}")
             print(f"[DEBUG] 正确题数: {correct}/{q_total}，最终得分: {score}")
-
+        
         return user_answer, score, box_list
+
 
     # ==================== 实时摄像头动态扫描（带可视化） ====================
 
@@ -390,7 +351,12 @@ class AutoMarkApp:
             if not ret:
                 break
 
-            warp_img, transform_info = self.auto_warp_perspective(frame)
+            result = self.auto_warp_perspective(frame)
+            if result is None:
+                warp_img = None
+                transform_info = None
+            else:
+                warp_img, transform_info = result
 
             score_text = "No AnswerSheet Detected"
 
