@@ -231,7 +231,7 @@ class AutoMarkApp:
             'orig_h': maxH
         }
 
-        return warp, transform_info
+        return warp_standard, transform_info
 
     # 自动寻找答题卡外框 + 四点透视矫正
     def mark_sheet_image(self, img_warped, transform_info):
@@ -255,20 +255,35 @@ class AutoMarkApp:
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if DEBUG: print(f"raw rect w:{w} h:{h}")
-            if w > (200 * transform_info['scale_x']) or h > (200 * transform_info['scale_y']): continue
-            if w < (25 * transform_info['scale_x']) or h < (25 * transform_info['scale_y']): continue
-            if (45 * transform_info['scale_x']) < w < (75 * transform_info['scale_x']) and (35 * transform_info['scale_y']) < h < (55 * transform_info['scale_y']):
+            if w > 200 or h > 200: continue
+            if w < 25 or h < 25: continue
+            if 45 < w < 75 and 35 < h < 55:
                 box_list.append((x, y, w, h))
         # 按横坐标、纵坐标聚类，只保留面积最大的外框
-        unique_box = {}
-        for (x, y, w, h) in box_list:
+        def is_overlapping(box1, box2, iou_thresh=0.5):
+            x1, y1, w1, h1 = box1
+            x2, y2, w2, h2 = box2
+            # 计算交集
+            ix1, iy1 = max(x1, x2), max(y1, y2)
+            ix2, iy2 = min(x1+w1, x2+w2), min(y1+h1, y2+h2)
+            if ix2 <= ix1 or iy2 <= iy1:
+                return False
+            inter_area = (ix2-ix1) * (iy2-iy1)
+            box1_area, box2_area = w1*h1, w2*h2
+            iou = inter_area / (box1_area + box2_area - inter_area)
+            return iou > iou_thresh
+        unique_box = []
+        '''for (x, y, w, h) in box_list:
             # 坐标取整，把同一方框的内外框合并到一组
             key = (round(x, -1), round(y, -1))
             area = w * h
             if key not in unique_box or area > unique_box[key][2] * unique_box[key][3]:
-                unique_box[key] = (x, y, w, h)
+                unique_box[key] = (x, y, w, h)'''
+        for box in sorted(box_list, key=lambda b: b[2]*b[3], reverse=True):  # 从大到小
+            if not any(is_overlapping(box, existing) for existing in unique_box):
+                unique_box.append(box)
         
-        box_list = list(unique_box.values())
+        box_list = unique_box.copy()
         # 重新排序
         box_list.sort(key=lambda b: (round(b[1]/70), b[0]))
 
