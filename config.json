@@ -1,0 +1,15 @@
+{
+    "question_count": 6,
+    "option_count": 4,
+    "option_text": ["A", "B", "C", "D"],
+    "standard_answer": {
+        "0": 0,
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 0,
+        "5": 1
+    },
+    "fill_ratio_threshold": 0.45,
+    "font": "simsun.ttc"
+}
