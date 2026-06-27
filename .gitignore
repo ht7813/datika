@@ -12,3 +12,7 @@ wheels/
 *.png
 debug_binary.png
 answer_sheet*.png
+main.build/
+main.dist/
+main.onefile-build/
+*.exe

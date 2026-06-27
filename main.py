@@ -241,8 +241,9 @@ class AutoMarkApp:
         
         gray = cv2.cvtColor(img_warped, cv2.COLOR_BGR2GRAY)
         # 取消反向！白底黑字正常二值化
-        #_, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        gray_enhanced = clahe.apply(gray)
+        _, binary = cv2.threshold(gray_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         # 形态学闭运算，把细线补全
         kernel = np.ones((3,3), np.uint8)
@@ -360,24 +361,51 @@ class AutoMarkApp:
         if not cap.isOpened():
             messagebox.showerror("错误", "无法打开摄像头")
             return
-
+        score_history = []  # 存最近5帧的分数
+        answer_history = []  # 存最近5帧的答案字典
+        STABLE_FRAMES = 5   # 需要连续稳定多少帧才更新显示
         while True:
             ret, frame = cap.read()
-            if not ret:
-                break
-
+            if not ret: break
+            warp_img = None
+            transform_info = None
+            box_list = []
+            score = 0.0
+            ans_dict = {}
+            
             result = self.auto_warp_perspective(frame)
-            if result is None:
-                warp_img = None
-                transform_info = None
-            else:
+            if result is not None:
                 warp_img, transform_info = result
-
-            score_text = "No AnswerSheet Detected"
+                ans_dict, score, box_list = self.mark_sheet_image(warp_img, transform_info)
+                if len(box_list) != self.config['question_count'] * self.config['option_count']: 
+                    score_text = "Checking..."
+                else:
+                # 存入历史
+                    score_history.append(score)
+                    answer_history.append(ans_dict)
+                    if len(score_history) > STABLE_FRAMES:
+                        score_history.pop(0)
+                        answer_history.pop(0)
+                    
+                    # 判断是否稳定：最近STABLE_FRAMES帧的分数是否一致
+                    if len(score_history) == STABLE_FRAMES and len(set(score_history)) == 1:
+                        stable_score = score_history[0]
+                        stable_answer = answer_history[0]  # 取最新一帧的答案
+                        score_text = f"Score: {stable_score} (Stable)"
+                    else:
+                        # 还没稳定，显示"检测中"
+                        if len(score_history) > 0:
+                            score_text = f"Score: {score_history[-1]} (Checking...)"
+                        else:
+                            score_text = "Checking..."
+            else:
+                score_history.clear()
+                answer_history.clear()
+                score_text = "No AnswerSheet Detected"
 
             if warp_img is not None:
-                ans_dict, score, box_list = self.mark_sheet_image(warp_img, transform_info)
-                score_text = f"Score: {score}"
+                #ans_dict, score, box_list = self.mark_sheet_image(warp_img, transform_info)
+                #score_text = f"Score: {score}"
 
                 # 在原图上绘制可视化边框
                 if transform_info is not None:
