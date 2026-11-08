@@ -469,14 +469,23 @@ class AutoMarkApp:
             return
 
         img = cv2.imread(file_path)
-        warp_img, transform_info = self.auto_warp_perspective(img)
-
-        if warp_img is None:
+        try:
+            warp_img, transform_info = self.auto_warp_perspective(img)
+            if warp_img is None:
+                messagebox.showerror("识别失败", "未检测到答题卡边框，请摆正图片")
+                return
+        except:
             messagebox.showerror("识别失败", "未检测到答题卡边框，请摆正图片")
             return
 
         ans_dict, score, _ = self.mark_sheet_image(warp_img, transform_info)
-        messagebox.showinfo("阅卷结果", f"得分：{score} 分\n考生答案：{ans_dict}")
+        if ans_dict == None and score == 0:
+            messagebox.showerror("识别失败", "读取答题卡答案时出现错误")
+            return
+        ans_readable = ""
+        for i in range(self.config['question_count']):
+            ans_readable = f"{ans_readable}\n第{i+1}题：{"未作答" if ans_dict[str(i)] == -1 else self.config['option_text'][ans_dict[str(i)]]} {"(正确)" if self.config['standard_answer'][str(i)] == ans_dict[str(i)] else ""}"
+        messagebox.showinfo("阅卷结果", f"得分：{score} 分\n考生答案：{ans_readable}")
 
 
 if __name__ == "__main__":
