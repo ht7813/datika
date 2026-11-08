@@ -12,7 +12,11 @@ wheels/
 *.png
 debug_binary.png
 answer_sheet*.png
+*.png
 main.build/
 main.dist/
 main.onefile-build/
 *.exe
+
+*config*
+!config.json.example
